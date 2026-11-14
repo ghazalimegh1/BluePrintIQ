@@ -1,6 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
-  Activity,
   AlertCircle,
   ArrowDownRight,
   ArrowUpRight,
@@ -533,9 +532,6 @@ function App() {
           <button className="icon-link panel-toggle" onClick={() => setAssistantOpen((open) => !open)} title="Toggle question panel">
             <MessageSquareText size={15} /><span>{assistantOpen ? "Close panel" : "Ask"}</span>
           </button>
-          <a className="icon-link" href="/api/health" target="_blank" rel="noreferrer" title="Backend health">
-            <Activity size={16} /><span>System</span>
-          </a>
         </div>
       </header>
 
