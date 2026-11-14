@@ -5,7 +5,7 @@
 1. `backend/app/ingestion.py` detects formats, builds the local catalog, and reports format-specific capabilities. It never loads question answers.
 2. `backend/app/llm_interpreter.py` uses the official Groq SDK with `GROQ_API_KEY` and `GROQ_MODEL` only after per-tab user consent. Groq receives the question and tool descriptions to create a validated plan; it never receives drawings, OCR results, retrieved evidence, or answers.
 3. `backend/app/routing.py` checks the selected document format, available tools, and plan, then runs the matching local tool.
-4. `backend/app/tools.py` executes IFC typed-entity counts, explicit DXF block/layer queries, DXF room-outline area calculations, PDF/SVG text retrieval, and optional EasyOCR/PaddleOCR extraction.
+4. `backend/app/tools.py` executes IFC typed-entity counts, explicit DXF block/layer queries, DXF room-outline area calculations, PDF/SVG text retrieval, optional EasyOCR/PaddleOCR extraction, and explainable classical-CV line/component analysis.
 5. `backend/app/vision_models.py` provides optional local Grounding DINO Tiny detection, SAM 2.1 masks, CubiCasa floor-plan segmentation, and PaddleOCR. Local model weights are opt-in and must be cached before use.
 6. `backend/app/gemini_vision.py` provides optional hosted semantic review using the allowlisted free-tier Gemini model. After separate per-request consent, it sends a reduced/annotated drawing image, the question, and up to 64 local Grounding DINO candidates. Gemini may flag label ambiguity; it cannot create counts, measurements, boxes, or answers.
 7. `EvidenceRef` records source path, page/entity, coordinate system, extracted content, geometry, and extraction method. Model overlays preserve original drawing coordinates. IFC elements remain model-coordinate references because no projection to the companion page is established.
@@ -32,6 +32,7 @@
 - OCR: optional English EasyOCR or PaddleOCR uses local weights and returns source-coordinate text regions. OCR is not an object detector or schedule parser.
 - DXF: vector SVG rendering, explicit named block counts, door geometry on the explicitly named `DOOR` layer, and closed `ROOM_OUTLINE` polygon areas. Open room outlines are excluded and reported. Other primitives are not silently equated to semantic objects.
 - PNG/JPEG: local tiled object detection and segmentation when dependencies and weights are installed; optional local OCR; Gemini semantic review only when local detections exist and per-request consent is given. Model counts remain partial and are not calibrated ground truth.
+- PDF/PNG/JPEG classical CV: optional OpenCV preprocessing, Canny edges, probabilistic Hough lines, morphology, and connected components produce source-aligned geometric candidates. They are cross-check/evidence tools only and never become semantic object counts automatically.
 - SVG: parsed vector metadata, native text retrieval, and text-anchor evidence when no ancestor transforms make the anchor ambiguous.
 - DWG: format recognition only; an ODA converter is not installed/configured.
 

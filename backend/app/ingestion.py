@@ -10,7 +10,7 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .ocr import ocr_is_available
+from .ocr import configured_ocr_languages, ocr_is_available
 from .schemas import Capability, DocumentRecord
 
 
@@ -129,7 +129,7 @@ def _capabilities(path: Path) -> tuple[list[Capability], int | None, str]:
                         Capability(
                             capability_type="ocr",
                             available=ocr_available,
-                            details={"engine": "EasyOCR", "languages": ["en"]} if ocr_available else {},
+                            details={"engine": "EasyOCR", "languages": list(configured_ocr_languages())} if ocr_available else {},
                             limitations=[] if ocr_available else [
                                 "Install the optional EasyOCR requirements and local English model weights to process scanned pages"
                             ],
@@ -157,7 +157,7 @@ def _capabilities(path: Path) -> tuple[list[Capability], int | None, str]:
                 Capability(
                     capability_type="ocr",
                     available=ocr_available,
-                    details={"engine": "EasyOCR", "languages": ["en"]} if ocr_available else {},
+                    details={"engine": "EasyOCR", "languages": list(configured_ocr_languages())} if ocr_available else {},
                     limitations=[] if ocr_available else [
                         "Install the optional EasyOCR requirements and local English model weights"
                     ],

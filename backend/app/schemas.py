@@ -29,7 +29,15 @@ class DocumentRecord(BaseModel):
 
 class QuestionSpec(BaseModel):
     original_question: str
+    corrections: list[str] = Field(default_factory=list)
     operation: Literal["count", "measure", "find_text", "calculate", "describe"]
+    # The benchmark uses these five top-level labels.  Keep this separate from
+    # ``operation`` because property/schedule questions are text-labelled even
+    # when they ask for a numeric value (for example, door widths by type).
+    question_type: Literal["count", "area", "length", "volume", "text", "other"] = "other"
+    intent: Literal[
+        "count", "measure", "retrieve", "aggregate", "compare", "summarize", "describe"
+    ] = "describe"
     entity_concepts: list[str] = Field(default_factory=list)
     recommended_tools: list[str] = Field(default_factory=list)
     scope: str | None = None
@@ -92,6 +100,48 @@ class EvidenceOverlay(BaseModel):
     model_name: str | None = None
     is_model_output: bool
     evidence_ids: list[str] = Field(default_factory=list)
+
+
+class SceneRelationship(BaseModel):
+    relationship_type: str
+    target_id: str
+    provenance_status: Literal["explicit", "measured", "detected", "inferred", "illustrative", "unknown"]
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class SceneElement(BaseModel):
+    id: str
+    global_id: str | None = None
+    entity_type: str
+    name: str
+    geometry_kind: Literal["triangle_mesh", "polygon"]
+    vertices: list[float]
+    indices: list[int]
+    coordinate_system: str
+    unit: str
+    properties: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    relationships: list[SceneRelationship] = Field(default_factory=list)
+    provenance: dict[str, Any]
+
+
+class SceneResponse(BaseModel):
+    document_id: str
+    source_path: str
+    source_format: str
+    status: Literal["ready", "partial", "unavailable"]
+    coordinate_system: str
+    unit: str
+    source_origin: list[float] | None = None
+    total_elements: int = 0
+    offset: int = 0
+    limit: int = 0
+    has_more: bool = False
+    elements: list[SceneElement] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SceneSelectionRequest(BaseModel):
+    element_ids: list[str] = Field(min_length=1, max_length=500)
 
 
 class ToolResult(BaseModel):

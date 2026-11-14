@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any
 
 from .llm_interpreter import (
@@ -16,6 +17,7 @@ from .tools import (
     interpret_question,
     query_dxf_named_blocks,
     calculate_dxf_room_area,
+    analyze_classical_cv,
     query_ifc_count,
     search_pdf_ocr,
     search_pdf_text,
@@ -28,9 +30,15 @@ from .vision_models import (
     capability_status,
     detect_objects,
     load_source_image,
+    retain_significant_room_regions,
     segment_detections,
     segment_floorplan_cubicasa,
 )
+
+RASTER_ROOM_LABELS = {
+    "kitchen", "living room", "bedroom", "bath", "bathroom", "hallway", "storage",
+    "garage", "sauna", "balcony", "separate wc", "other room",
+}
 
 
 def available_tools() -> list[dict[str, Any]]:
@@ -51,6 +59,12 @@ def available_tools() -> list[dict[str, Any]]:
         pdf_available = False
     vision = capability_status()
     local_ocr_available = ocr_is_available()
+    try:
+        import cv2  # noqa: F401
+        import numpy  # noqa: F401
+        classical_cv_available = True
+    except ImportError:
+        classical_cv_available = False
     registry = []
     for spec in tool_registry():
         installed = {
@@ -67,6 +81,7 @@ def available_tools() -> list[dict[str, Any]]:
             ),
             "local_ocr_text_search": local_ocr_available,
             "svg_text_search": True,
+            "classical_cv_analysis": classical_cv_available,
         }[spec.name]
         registry.append({
             **spec.model_dump(),
@@ -110,6 +125,7 @@ def _raster_vision_answer(
         detections = []
         if "cubicasa_floorplan_segmentation" in selected_tools:
             regions = segment_floorplan_cubicasa(source)
+            raw_region_count = len(regions)
             trace.append(PlanStep(
                 tool_name="cubicasa_floorplan_segmentation",
                 status="succeeded",
@@ -119,14 +135,32 @@ def _raster_vision_answer(
             requested = set(spec.entity_concepts)
             if "space" in requested:
                 requested.add("room")
+            if "room" in requested:
+                requested.update(RASTER_ROOM_LABELS)
             if "sanitary fixture" in requested:
-                requested.update({"toilet", "sink"})
+                requested.update({"toilet", "sink", "shower", "bathtub"})
+            if "bathroom" in requested:
+                requested.update({"bath", "bathroom"})
             if requested:
                 regions = [
                     region for region in regions
                     if region["label"].casefold() in requested
                 ]
-        elif "grounding_dino_detection" in selected_tools:
+                if "room" in spec.entity_concepts or "space" in spec.entity_concepts:
+                    regions = retain_significant_room_regions(
+                        regions, source.native_width, source.native_height
+                    )
+                    if len(regions) < raw_region_count:
+                        trace.append(PlanStep(
+                            tool_name="room_region_validator",
+                            status="succeeded",
+                            summary=(
+                                f"Retained {len(regions)} significant room footprints from "
+                                f"{raw_region_count} raw segmentation regions; removed small fragments."
+                            ),
+                            evidence_count=len(regions),
+                        ))
+        if "grounding_dino_detection" in selected_tools:
             if not spec.entity_concepts:
                 return _abstain(
                     spec,
@@ -166,7 +200,7 @@ def _raster_vision_answer(
                     summary=f"Generated {len(regions)} SAM 2.1 masks from detector boxes.",
                     evidence_count=len(regions),
                 ))
-        else:
+        if not selected_tools:
             return _abstain(
                 spec,
                 "No compatible local vision model is installed with cached weights.",
@@ -188,8 +222,11 @@ def _raster_vision_answer(
 
     evidence: list[EvidenceRef] = []
     overlays: list[EvidenceOverlay] = []
+    opening_query = any(concept in {"window", "door"} for concept in spec.entity_concepts)
     model_name = (
-        "CubiCasa5K"
+        "Grounding DINO Tiny"
+        if opening_query and detections
+        else "CubiCasa5K"
         if "cubicasa_floorplan_segmentation" in selected_tools
         else "Grounding DINO Tiny"
     )
@@ -232,6 +269,11 @@ def _raster_vision_answer(
                 evidence_ids=[evidence_id],
             ))
     for index, region in enumerate(regions):
+        # For openings, detector instances are the primary evidence. CubiCasa
+        # remains a cross-check, but duplicating its masks in the answer would
+        # make one physical opening look like two evidence items.
+        if opening_query and detections:
+            continue
         detection = region.get("detection")
         evidence_id = f"{document_id}-mask-p{page_number}-{index}"
         bbox = region["bbox"]
@@ -369,19 +411,41 @@ def _raster_vision_answer(
             trace,
         )
 
+    detector_count = len(detections) if detections else None
+    segmentation_count = (
+        len(regions)
+        if "cubicasa_floorplan_segmentation" in selected_tools
+        else None
+    )
     count = len(evidence)
-    if "sam2_instance_segmentation" in selected_tools and detections:
-        count = len(detections)
-    if "cubicasa_floorplan_segmentation" in selected_tools:
-        count = len(regions)
+    if opening_query and detector_count is not None:
+        count = detector_count
+    elif segmentation_count is not None:
+        count = segmentation_count
     target = spec.entity_concepts[0] if spec.entity_concepts else "objects"
     answer_text = f"{count} {target}{'' if count == 1 else 's'} detected by {model_name}"
     if spec.operation == "count":
         answer_text += " (model prediction, not independently verified)"
+    arbitration_uncertain = False
     warnings = [
         "Model detections/segmentations are not ground truth or calibrated measurements.",
         "Counts are limited to retained regions above the configured model threshold.",
     ]
+    if opening_query and detector_count is not None and segmentation_count is not None:
+        difference = abs(detector_count - segmentation_count)
+        disagreement_limit = max(2, round(max(detector_count, segmentation_count) * 0.35))
+        if difference > disagreement_limit:
+            arbitration_uncertain = True
+            warnings.append(
+                "Detector arbitration found a material disagreement: "
+                f"Grounding DINO returned {detector_count}, while CubiCasa returned "
+                f"{segmentation_count}. No single count was promoted to verified truth; "
+                "review the highlighted evidence."
+            )
+        else:
+            warnings.append(
+                f"Cross-check: Grounding DINO found {detector_count}; CubiCasa found {segmentation_count}."
+            )
     if document_format == "pdf":
         warnings.append(f"Only selected PDF page {page_number} was processed.")
     if review_notes:
@@ -397,10 +461,15 @@ def _raster_vision_answer(
         evidence_count=len(evidence),
     ))
     return FinalAnswer(
-        status="partial",
-        answer=answer_text,
-        value=count,
-        unit="count" if spec.operation == "count" else None,
+        status="uncertain" if arbitration_uncertain else "partial",
+        answer=(
+            f"Detector disagreement: Grounding DINO found {detector_count} {target}s, "
+            f"while CubiCasa found {segmentation_count} {target}s. Review the highlighted evidence."
+            if arbitration_uncertain
+            else answer_text
+        ),
+        value=None if arbitration_uncertain else count,
+        unit=None if arbitration_uncertain else "count" if spec.operation == "count" else None,
         evidence=evidence,
         overlays=overlays,
         warnings=warnings,
@@ -411,6 +480,58 @@ def _raster_vision_answer(
         question_spec=spec,
         trace=trace,
         validation=validation,
+    )
+
+
+def _wants_classical_cv(question: str) -> bool:
+    lowered = question.casefold()
+    return any(term in lowered for term in (
+        "hough", "canny", "classical cv", "classical computer vision",
+        "dominant wall", "wall lines", "major wall lines", "line directions",
+        "detect lines", "highlight lines", "connected components",
+    ))
+
+
+def _finalize_classical_cv_result(spec: QuestionSpec, trace: list[PlanStep], result: Any) -> FinalAnswer:
+    trace.append(PlanStep(
+        tool_name="classical_cv_analysis",
+        status="succeeded" if result.evidence else "skipped" if result.status == "abstain" else "failed",
+        summary=(
+            f"Produced {len(result.evidence)} source-aligned classical-CV geometry candidates."
+            if result.evidence
+            else result.error or "; ".join(result.warnings) or "No classical-CV candidates were found."
+        ),
+        evidence_count=len(result.evidence),
+    ))
+    if result.status == "error":
+        return FinalAnswer(
+            status="error",
+            answer="Classical computer-vision analysis failed.",
+            question_spec=spec,
+            trace=trace,
+            validation=result.error or "Classical-CV analysis failed.",
+        )
+    if not result.evidence:
+        return _abstain(spec, "No classical-CV line or component evidence was found.", trace)
+    return FinalAnswer(
+        status="partial",
+        answer=(
+            "Classical CV found source-aligned line and connected-component candidates. "
+            "These are geometric cues, not semantic object counts."
+        ),
+        value=result.value,
+        evidence=result.evidence,
+        overlays=result.overlays,
+        warnings=result.warnings,
+        assumptions=result.assumptions,
+        question_spec=spec,
+        trace=trace + [PlanStep(
+            tool_name="evidence_validator",
+            status="skipped",
+            summary="Classical candidates were not promoted to architectural labels or quantities.",
+            evidence_count=len(result.evidence),
+        )],
+        validation="OpenCV geometry candidates were mapped to source coordinates; semantic interpretation remains unverified.",
     )
 
 
@@ -426,6 +547,14 @@ def answer_question(
 ) -> FinalAnswer:
     if document_format in {"png", "jpg", "jpeg"}:
         local_spec = interpret_question(question)
+        if _wants_classical_cv(question):
+            trace = [PlanStep(
+                tool_name="question_interpreter",
+                status="succeeded",
+                summary="Selected an explainable classical-CV geometry route from the question wording.",
+            )]
+            result = analyze_classical_cv(document_id, relative_path, file_path, document_format)
+            return _finalize_classical_cv_result(local_spec, trace, result)
         try:
             provider = configured_provider(llm_config)
         except InterpreterError as exc:
@@ -472,7 +601,8 @@ def answer_question(
                 summary=(
                     f"{interpreter} planned operation={spec.operation}; "
                     f"entities={spec.entity_concepts or ['unspecified']}; "
-                    f"tools={spec.recommended_tools or ['local capability router']}."
+                    f"tools={spec.recommended_tools or ['local capability router']}"
+                    f"{'; corrected ' + ', '.join(spec.corrections) if spec.corrections else ''}."
                 ),
             ),
             PlanStep(
@@ -529,7 +659,7 @@ def answer_question(
                 trace=trace + [PlanStep(
                     tool_name="evidence_validator",
                     status="skipped",
-                    summary="OCR text is mapped to source pixels but may contain recognition errors.",
+                    summary="OCR text is mapped to source pixels; configured language models may contain recognition errors.",
                     evidence_count=len(result.evidence),
                 )],
                 validation="Local OCR text was mapped to source regions; recognition was not independently corrected.",
@@ -544,6 +674,11 @@ def answer_question(
                 and any(concept in {"window", "door", "room", "space"} for concept in spec.entity_concepts)
             ):
                 selected_tools.append("cubicasa_floorplan_segmentation")
+                if (
+                    "grounding_dino_detection" in names
+                    and any(concept in {"window", "door"} for concept in spec.entity_concepts)
+                ):
+                    selected_tools.append("grounding_dino_detection")
             elif spec.operation in {"count", "describe"} and "grounding_dino_detection" in names:
                 selected_tools.append("grounding_dino_detection")
             if (
@@ -628,6 +763,7 @@ def answer_question(
                 f"entities={spec.entity_concepts or ['unspecified']}; "
                 f"tools={spec.recommended_tools or ['local capability router']}; "
                 f"scope={spec.scope or 'document'}"
+                f"{'; corrected ' + ', '.join(spec.corrections) if spec.corrections else ''}"
             ),
         ),
         PlanStep(
@@ -636,6 +772,12 @@ def answer_question(
             summary=f"Selected route from the actual {document_format.upper()} document format and registered tool capabilities.",
         ),
     ]
+
+    if document_format == "pdf" and _wants_classical_cv(question):
+        result = analyze_classical_cv(
+            document_id, relative_path, file_path, document_format, page_number or 1
+        )
+        return _finalize_classical_cv_result(spec, trace, result)
 
     if document_format == "pdf" and spec.operation in {"count", "describe"}:
         selected_tools = list(spec.recommended_tools)
@@ -652,6 +794,11 @@ def answer_question(
                 and any(concept in {"window", "door", "room", "space"} for concept in spec.entity_concepts)
             ):
                 selected_tools.append("cubicasa_floorplan_segmentation")
+                if (
+                    "grounding_dino_detection" in names
+                    and any(concept in {"window", "door"} for concept in spec.entity_concepts)
+                ):
+                    selected_tools.append("grounding_dino_detection")
             elif "grounding_dino_detection" in names:
                 selected_tools.append("grounding_dino_detection")
             if (
@@ -801,7 +948,7 @@ def answer_question(
             trace.append(PlanStep(
                 tool_name="local_ocr_text_search",
                 status="running",
-                summary=f"Running local English OCR on the selected PDF page {page_number}.",
+                summary=f"Running local configured-language OCR on the selected PDF page {page_number}.",
             ))
             result = search_pdf_ocr(
                 document_id,
@@ -921,6 +1068,9 @@ def answer_question(
                 validation = "Count equals the returned LWPOLYLINE records on the explicitly named DOOR layer."
             else:
                 answer_text = f"{result.value} {spec.entity_concepts[0]}{'s' if result.value != 1 else ''}"
+                storey_match = re.search(r"spans (\d+) storeys", " ".join(result.warnings))
+                if storey_match:
+                    answer_text += f" across {storey_match.group(1)} storeys"
         else:
             validation = "Count did not match returned entity evidence; result downgraded."
             final_status = "uncertain"

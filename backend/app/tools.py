@@ -5,6 +5,7 @@ import re
 import string
 import xml.etree.ElementTree as ET
 from collections import Counter
+from difflib import get_close_matches
 from pathlib import Path
 from typing import Any
 
@@ -36,20 +37,44 @@ IFC_ENTITY_TYPES = {
     "roof": ("IfcRoof",),
     "furniture": ("IfcFurnishingElement",),
     "sanitary fixture": ("IfcSanitaryTerminal",),
+    "storey": ("IfcBuildingStorey",),
 }
 ENTITY_TERMS = {
-    "door": ("door", "doors", "doorway", "doorways"),
-    "window": ("window", "windows"),
-    "wall": ("wall", "walls"),
-    "room": ("room", "rooms"),
-    "space": ("space", "spaces"),
-    "column": ("column", "columns"),
-    "beam": ("beam", "beams"),
-    "stair": ("stair", "stairs", "staircase", "staircases"),
+    "door": ("door", "doors", "doorway", "doorways", "ovi", "ovet", "ovea", "ovia", "ovien"),
+    "window": ("window", "windows", "ikkuna", "ikkunat", "ikkunaa", "ikkunoita", "ikkunoiden"),
+    "wall": ("wall", "walls", "seinä", "seinät"),
+    "room": ("room", "rooms", "huone", "huoneet", "huonetta"),
+    "space": ("space", "spaces", "tila", "tilat", "huonetila"),
+    "column": ("column", "columns", "pilari", "pilarit"),
+    "beam": ("beam", "beams", "palkki", "palkit"),
+    "stair": ("stair", "stairs", "staircase", "staircases", "porras", "portaat"),
     "slab": ("slab", "slabs", "floor slab", "floor slabs"),
     "roof": ("roof", "roofs"),
     "furniture": ("furniture",),
     "sanitary fixture": ("sanitary fixture", "sanitary fixtures", "toilet", "toilets", "sink", "sinks"),
+    # Benchmark room-program and fixture classes.  These remain distinct so a
+    # detector/property adapter can preserve the requested class instead of
+    # reducing every sanitary object to one generic label.
+    "toilet": ("toilet", "toilets", "toilet bowl", "toilet bowls", "wc", "wcs", "wc seat", "wc seats"),
+    "sink": ("sink", "sinks", "wash basin", "wash basins", "washbasin", "washbasins"),
+    "shower": ("shower", "showers"),
+    "bathtub": ("bathtub", "bathtubs", "bath tub", "bath tubs"),
+    "bedroom": ("bedroom", "bedrooms"),
+    "kitchen": ("kitchen", "kitchens"),
+    "bathroom": ("bathroom", "bathrooms", "bath room", "bath rooms"),
+    "separate wc": ("separate wc", "separate wcs", "separate toilet", "guest wc"),
+    "sauna": ("sauna", "saunas"),
+    "balcony": ("balcony", "balconies"),
+    "storey": ("storey", "storeys", "story", "stories", "kerros", "kerrosta", "kerrokset", "kerroksia"),
+}
+CORRECTION_TERMS = tuple(sorted({term for terms in ENTITY_TERMS.values() for term in terms if " " not in term}, key=len))
+COMMON_CORRECTIONS = {
+    "windom": "window",
+    "windoms": "windows",
+    "widnow": "window",
+    "widnows": "windows",
+    "doorr": "door",
+    "doorrs": "doors",
 }
 STOP_WORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "can", "could", "do", "does",
@@ -61,16 +86,48 @@ STOP_WORDS = {
 
 
 def interpret_question(question: str) -> QuestionSpec:
-    lowered = question.casefold()
+    corrected_question = question.casefold()
+    corrections: list[str] = []
+    for match in re.finditer(r"\b[a-zA-Z]{4,}\b", corrected_question):
+        token = match.group(0)
+        replacement = COMMON_CORRECTIONS.get(token)
+        if replacement is None and token not in CORRECTION_TERMS:
+            match_candidates = get_close_matches(token, CORRECTION_TERMS, n=1, cutoff=0.88)
+            replacement = match_candidates[0] if match_candidates else None
+        if replacement and replacement != token:
+            corrected_question = re.sub(rf"\b{re.escape(token)}\b", replacement, corrected_question)
+            corrections.append(f"{token} → {replacement}")
+    lowered = corrected_question
     targets: list[str] = []
     for concept, terms in ENTITY_TERMS.items():
         if any(re.search(rf"\b{re.escape(term)}\b", lowered) for term in terms):
             targets.append(concept)
-    if "how many" in lowered or re.search(r"\b(count|number of)\b", lowered):
+    specific_fixtures = {"toilet", "sink", "shower", "bathtub"}
+    if specific_fixtures.intersection(targets):
+        targets = [concept for concept in targets if concept != "sanitary fixture"]
+    specific_room_program = {
+        "bedroom", "kitchen", "bathroom", "separate wc", "sauna", "balcony"
+    }
+    if specific_room_program.intersection(targets):
+        targets = [concept for concept in targets if concept != "room"]
+    # A floor/level count is a storey query, while "windows on Level 1"
+    # remains a window query with a spatial scope.
+    if (
+        "floor slab" not in lowered
+        and re.search(r"\b(?:how many|number of)\s+(?:floors?|storeys?|stories?|levels?)\b", lowered)
+        and "storey" not in targets
+    ):
+        targets.append("storey")
+    if (
+        "how many" in lowered
+        or "kuinka monta" in lowered
+        or "montako" in lowered
+        or re.search(r"\b(count|number of|lukumäärä|määrä)\b", lowered)
+    ):
         operation = "count"
     elif any(term in lowered for term in ("area", "length", "volume", "perimeter", "height", "width")):
         operation = "measure"
-    elif any(term in lowered for term in ("find", "search", "show me", "quote", "where is", "which text")):
+    elif any(term in lowered for term in ("find", "search", "show me", "quote", "where is", "which text", "etsi", "näytä")):
         operation = "find_text"
     elif any(term in lowered for term in ("segment", "segmentation", "mask", "detect", "highlight")):
         operation = "describe"
@@ -78,6 +135,54 @@ def interpret_question(question: str) -> QuestionSpec:
         operation = "describe"
     else:
         operation = "find_text"
+
+    # Match the dataset's evaluation taxonomy.  A measurement operation is
+    # split by requested physical dimension; property, schedule, summary, and
+    # comparison questions are intentionally classified as text because that
+    # is how the supplied benchmark labels them.
+    composite_summary = (
+        re.search(r"\bwhat\s+are\b", lowered)
+        and (
+            re.search(r"\b(number of|area|distribution|breakdown|percentage|percent|heights?)\b", lowered)
+            or lowered.count(" and ") >= 1
+        )
+    )
+    if composite_summary or (
+        re.search(r"\b(?:height|heights)\b", lowered)
+        and re.search(r"\b(?:each|every|level|storey|floor)\b", lowered)
+    ):
+        # IFC summaries and property schedules are labelled text in the
+        # benchmark, even if one requested field is numeric.
+        question_type = "text"
+    elif operation == "count":
+        question_type = "count"
+    elif re.search(r"\b(volume|volumes|cubic|m3|m\^3|m³)\b", lowered):
+        question_type = "volume"
+    elif re.search(r"\b(length|lengths|long|perimeter|span|distance|m\b|metre|meter|feet|foot|ft)\b", lowered):
+        question_type = "length"
+    elif re.search(r"\b(area|areas|floor area|footprint|square meters?|square metres?|m2|m\^2|m²)\b", lowered):
+        question_type = "area"
+    elif operation == "find_text" or targets:
+        question_type = "text"
+    else:
+        question_type = "other"
+
+    if composite_summary:
+        intent = "aggregate"
+    elif operation == "count":
+        intent = "count"
+    elif any(term in lowered for term in ("largest", "smallest", "widest", "narrowest", "greatest", "least", "most", "highest", "lowest")):
+        intent = "compare"
+    elif any(term in lowered for term in ("total", "distribution", "breakdown", "percentage", "percent", "each type", "by function", "by level")):
+        intent = "aggregate"
+    elif any(term in lowered for term in ("what are", "which", "what is", "name", "type", "function", "property", "material", "rating")):
+        intent = "retrieve"
+    elif operation == "measure":
+        intent = "measure"
+    elif any(term in lowered for term in ("summary", "summarize", "describe")):
+        intent = "summarize"
+    else:
+        intent = "describe"
 
     scope = None
     quoted = re.search(r"""['"“](.+?)['"”]""", question)
@@ -108,7 +213,10 @@ def interpret_question(question: str) -> QuestionSpec:
         ambiguities.append("The requested measurement unit is not explicit")
     return QuestionSpec(
         original_question=question,
+        corrections=corrections,
         operation=operation,
+        question_type=question_type,
+        intent=intent,
         entity_concepts=targets,
         scope=scope,
         output_unit=unit,
@@ -247,6 +355,19 @@ def tool_registry() -> list[ToolSpec]:
                 "Only the selected PDF page is processed",
             ],
         ),
+        ToolSpec(
+            name="classical_cv_analysis",
+            version=TOOL_VERSION,
+            description="Extract explainable line and connected-component candidates with OpenCV preprocessing and Hough analysis.",
+            operations=["describe"],
+            input_formats=["pdf", "png", "jpg", "jpeg"],
+            deterministic=True,
+            limitations=[
+                "Produces geometric candidates only; it does not label doors, rooms, fixtures, or other objects",
+                "Results depend on scan quality, thresholding, and drawing scale",
+                "Requires OpenCV and NumPy",
+            ],
+        ),
     ]
 
 
@@ -274,6 +395,25 @@ def query_ifc_count(
             elements.extend(model.by_type(type_name))
     except (RuntimeError, OSError, ValueError) as exc:
         return ToolResult(status="error", error=f"IFC model could not be queried: {exc}")
+
+    query_warnings: list[str] = []
+    if concept == "storey":
+        excluded = []
+        floor_elements = []
+        non_floor_terms = ("foundation", "vundament", "roof", "katus", "attic", "podium")
+        for element in elements:
+            name = str(getattr(element, "Name", "") or "").casefold()
+            if any(term in name for term in non_floor_terms):
+                excluded.append(str(getattr(element, "Name", "") or element.is_a()))
+            else:
+                floor_elements.append(element)
+        elements = floor_elements
+        if excluded:
+            query_warnings.append(
+                "Excluded non-occupiable IFC storeys from the floor count: "
+                + ", ".join(excluded)
+                + "."
+            )
 
     matched = []
     unscoped = 0
@@ -320,20 +460,40 @@ def query_ifc_count(
             is_model_output=False,
             evidence_ids=[entity_key],
         ))
-    warnings = []
+    warnings = list(query_warnings)
+    storey_counts: Counter[str] = Counter()
+    if not requested_scope:
+        for element in matched:
+            container = get_container(element)
+            storey_name = str(getattr(container, "Name", "") or "Unassigned") if container else "Unassigned"
+            storey_counts[storey_name] += 1
+        if len(storey_counts) > 1:
+            breakdown = ", ".join(f"{name}: {count}" for name, count in sorted(storey_counts.items()))
+            warnings.append(
+                f"This unscoped count spans {len(storey_counts)} storeys; the companion drawing may show only one level."
+            )
+        else:
+            breakdown = ""
+    else:
+        breakdown = ""
     if requested_scope and unscoped:
         warnings.append(f"{unscoped} matching IFC elements had no storey containment and were excluded.")
+    assumptions = [
+        f"Counted IFC entity types {', '.join(target_types)}.",
+        f"Spatial scope: {spec.scope}." if spec.scope else "No floor/storey scope was applied.",
+    ]
+    calculation = []
+    if breakdown:
+        calculation.append(f"Storey breakdown: {breakdown}.")
     return ToolResult(
         status="supported",
         value=len(matched),
         unit="count",
+        calculation=calculation,
         evidence=evidence,
         overlays=overlays,
         warnings=warnings,
-        assumptions=[
-            f"Counted IFC entity types {', '.join(target_types)}.",
-            f"Spatial scope: {spec.scope}." if spec.scope else "No floor/storey scope was applied.",
-        ],
+        assumptions=assumptions,
     )
 
 
@@ -693,7 +853,7 @@ def _search_ocr_lines(
     if not lines:
         return ToolResult(
             status="abstain",
-            warnings=["OCR did not detect readable English text in the source region."],
+            warnings=["OCR did not detect readable text in the source region."],
         )
     terms = _query_terms(question)
     ranked: list[tuple[int, OCRLine]] = []
@@ -728,7 +888,7 @@ def _search_ocr_lines(
             bbox=bbox,
             geometry={"confidence": line.confidence},
             coordinate_system=coordinate_system,
-            extraction_method="EasyOCR local English text detection",
+            extraction_method="EasyOCR local configured-language text detection",
             source_tool_version=TOOL_VERSION,
         ))
         overlays.append(EvidenceOverlay(
@@ -782,6 +942,107 @@ def search_raster_ocr(
         1.0,
         1.0,
         spec.original_question,
+    )
+
+
+def analyze_classical_cv(
+    document_id: str,
+    relative_path: str,
+    path: Path,
+    document_format: str,
+    page_number: int = 1,
+) -> ToolResult:
+    """Return explainable line/component evidence without semantic counting."""
+    try:
+        from .classical_cv import ClassicalCVUnavailable, analyze_plan_image
+        from .vision_models import load_source_image
+
+        source = load_source_image(path, document_format, page_number)
+        analysis = analyze_plan_image(source.image)
+    except ClassicalCVUnavailable as exc:
+        return ToolResult(status="abstain", warnings=[str(exc)])
+    except (OSError, RuntimeError, ValueError) as exc:
+        return ToolResult(status="error", error=f"Classical drawing analysis failed: {exc}")
+
+    evidence: list[EvidenceRef] = []
+    overlays: list[EvidenceOverlay] = []
+    for index, line in enumerate(analysis["lines"]):
+        evidence_id = f"{document_id}-classical-line-p{page_number}-{index}"
+        evidence.append(EvidenceRef(
+            document_id=document_id,
+            path=relative_path,
+            page=page_number if document_format == "pdf" else None,
+            entity_type="detected_line",
+            extracted_content=(
+                f"Line {line['length_pixels']:.1f}px at {line['angle_degrees']:.1f} degrees"
+            ),
+            geometry={"points": line["points"]},
+            coordinate_system=source.coordinate_system,
+            extraction_method="Canny edges with probabilistic Hough transform",
+            source_tool_version=TOOL_VERSION,
+        ))
+        overlays.append(EvidenceOverlay(
+            overlay_id=evidence_id,
+            document_id=document_id,
+            page_or_view_id=str(page_number) if document_format == "pdf" else None,
+            overlay_type="polyline",
+            geometry={"points": line["points"]},
+            coordinate_system=source.coordinate_system,
+            label=f"line {line['angle_degrees']:.1f} deg",
+            class_name="detected_line",
+            source_tool="classical_cv_analysis",
+            model_name="OpenCV HoughLinesP",
+            is_model_output=False,
+            evidence_ids=[evidence_id],
+        ))
+    for index, component in enumerate(analysis["components"]):
+        evidence_id = f"{document_id}-classical-component-p{page_number}-{index}"
+        evidence.append(EvidenceRef(
+            document_id=document_id,
+            path=relative_path,
+            page=page_number if document_format == "pdf" else None,
+            entity_type="connected_component",
+            extracted_content=f"Connected component {component['area_pixels']} pixels",
+            bbox=component["bbox"],
+            geometry={"centroid": component["centroid"]},
+            coordinate_system=source.coordinate_system,
+            extraction_method="Adaptive threshold, morphology, and connected components",
+            source_tool_version=TOOL_VERSION,
+        ))
+        overlays.append(EvidenceOverlay(
+            overlay_id=evidence_id,
+            document_id=document_id,
+            page_or_view_id=str(page_number) if document_format == "pdf" else None,
+            overlay_type="bounding_box",
+            geometry={"bbox": component["bbox"], "area_pixels": component["area_pixels"]},
+            coordinate_system=source.coordinate_system,
+            label=f"component {component['area_pixels']} px",
+            class_name="connected_component",
+            source_tool="classical_cv_analysis",
+            model_name="OpenCV connected components",
+            is_model_output=False,
+            evidence_ids=[evidence_id],
+        ))
+    if not evidence:
+        return ToolResult(
+            status="abstain",
+            warnings=["No sufficiently large line or connected-component candidates were found."],
+        )
+    return ToolResult(
+        status="partial",
+        value={
+            "line_count": len(analysis["lines"]),
+            "component_count": len(analysis["components"]),
+            "edge_density": analysis["edge_density"],
+        },
+        unit=None,
+        evidence=evidence,
+        overlays=overlays,
+        warnings=[
+            "Classical CV candidates are geometric evidence only; they are not architectural object labels or verified quantities.",
+            f"Detected {len(analysis['lines'])} long-line candidates and {len(analysis['components'])} connected components.",
+        ],
+        assumptions=["Coordinates are source-image pixels or rendered PDF coordinates."],
     )
 
 

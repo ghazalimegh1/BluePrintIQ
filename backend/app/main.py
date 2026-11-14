@@ -12,18 +12,32 @@ from fastapi.staticfiles import StaticFiles
 
 from . import ingestion
 from .routing import answer_question, available_tools
-from .schemas import AskRequest
 from .gemini_vision import gemini_vl_status
+from .scene import SceneUnavailable, build_scene
+from .schemas import AskRequest, SceneResponse, SceneSelectionRequest
 
 
 ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_ROOT = ROOT / "frontend"
+BLUELOGIC_DIST = FRONTEND_ROOT / "dist"
 app = FastAPI(title="STOA Construction Document Intelligence", version="0.1.0")
 app.mount("/static", StaticFiles(directory=FRONTEND_ROOT), name="static")
+if (BLUELOGIC_DIST / "assets").is_dir():
+    app.mount(
+        "/assets",
+        StaticFiles(directory=BLUELOGIC_DIST / "assets"),
+        name="blue-logic-assets",
+    )
 
 
 @app.get("/")
 def home() -> FileResponse:
+    index = BLUELOGIC_DIST / "index.html"
+    return FileResponse(index if index.is_file() else FRONTEND_ROOT / "index.html")
+
+
+@app.get("/legacy")
+def legacy_home() -> FileResponse:
     return FileResponse(FRONTEND_ROOT / "index.html")
 
 
@@ -131,6 +145,80 @@ def document_license(document_id: str) -> dict[str, str]:
     }
 
 
+def _scene_for_document(
+    document: ingestion.DocumentRecord,
+    path: Path,
+    *,
+    offset: int = 0,
+    limit: int = 150,
+    page_number: int = 1,
+    selected_ids: list[str] | None = None,
+) -> SceneResponse:
+    try:
+        return build_scene(
+            document.document_id,
+            document.path,
+            path,
+            document.format,
+            offset=offset,
+            limit=limit,
+            page_number=page_number,
+            selected_ids=selected_ids,
+        )
+    except SceneUnavailable as exc:
+        return SceneResponse(
+            document_id=document.document_id,
+            source_path=document.path,
+            source_format=document.format,
+            status="unavailable",
+            coordinate_system="unknown",
+            unit="unknown",
+            warnings=[str(exc)],
+        )
+
+
+@app.get("/api/documents/{document_id}/scene", response_model=SceneResponse)
+def document_scene(
+    document_id: str,
+    offset: int = 0,
+    limit: int = 150,
+    page: int = 1,
+) -> SceneResponse:
+    if offset < 0 or not 1 <= limit <= 400 or page < 1:
+        raise HTTPException(
+            status_code=422,
+            detail="Scene offset must be non-negative; limit must be 1–400; page starts at 1.",
+        )
+    try:
+        document, path = ingestion.find_document(document_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _scene_for_document(
+        document, path, offset=offset, limit=limit, page_number=page
+    )
+
+
+@app.post(
+    "/api/documents/{document_id}/scene/elements",
+    response_model=SceneResponse,
+)
+def selected_scene_elements(
+    document_id: str, request: SceneSelectionRequest
+) -> SceneResponse:
+    try:
+        document, path = ingestion.find_document(document_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if document.format != "ifc":
+        raise HTTPException(
+            status_code=415,
+            detail="Selecting 3D geometry by GlobalId is supported only for IFC models.",
+        )
+    return _scene_for_document(
+        document, path, selected_ids=request.element_ids
+    )
+
+
 @app.get("/api/documents/{document_id}/preview")
 def document_preview(document_id: str, page: int = 1) -> Response:
     try:
@@ -186,6 +274,21 @@ def document_preview(document_id: str, page: int = 1) -> Response:
             "svg": "image/svg+xml",
         }[document.format]
         headers = {}
+        if document.format in {"png", "jpg", "jpeg"}:
+            try:
+                from PIL import Image
+
+                with Image.open(path) as image:
+                    width, height = image.size
+            except (ImportError, OSError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail=f"Raster preview failed: {exc}") from exc
+            headers = {
+                "X-Page-Width": str(width),
+                "X-Page-Height": str(height),
+                "X-Page-Number": "1",
+                "X-Page-Count": "1",
+                "X-Coordinate-System": "source_pixels_display_only",
+            }
         if document.format == "svg":
             try:
                 view_box = ingestion.read_svg_viewbox(path)

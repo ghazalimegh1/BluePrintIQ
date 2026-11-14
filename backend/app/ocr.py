@@ -12,6 +12,15 @@ from typing import Any
 DETECTION_MODEL = "craft_mlt_25k.pth"
 ENGLISH_RECOGNITION_MODEL = "english_g2.pth"
 MAX_OCR_PIXELS = 16_000_000
+SUPPORTED_OCR_LANGUAGES = {"en", "fi"}
+
+
+def configured_ocr_languages() -> tuple[str, ...]:
+    raw = os.getenv("STOA_OCR_LANGUAGES", "en").strip().casefold()
+    languages = tuple(dict.fromkeys(item.strip() for item in raw.split(",") if item.strip()))
+    if not languages or any(language not in SUPPORTED_OCR_LANGUAGES for language in languages):
+        raise OCRError("STOA_OCR_LANGUAGES must contain only supported codes: en,fi.")
+    return languages
 
 
 class OCRUnavailable(RuntimeError):
@@ -116,7 +125,13 @@ def _reader(model_directory: str, download_enabled: bool) -> Any:
         ) from exc
 
     directory = Path(model_directory)
-    if not download_enabled and not (
+    languages = configured_ocr_languages()
+    if languages != ("en",) and not download_enabled:
+        raise OCRUnavailable(
+            "Configured multilingual EasyOCR weights are missing; set "
+            "STOA_OCR_DOWNLOAD_MODELS=true once or cache the requested language models."
+        )
+    if languages == ("en",) and not (
         (directory / DETECTION_MODEL).is_file()
         and (directory / ENGLISH_RECOGNITION_MODEL).is_file()
     ):
@@ -127,14 +142,14 @@ def _reader(model_directory: str, download_enabled: bool) -> Any:
     try:
         directory.mkdir(parents=True, exist_ok=True)
         return easyocr.Reader(
-            ["en"],
+            list(languages),
             gpu=False,
             model_storage_directory=str(directory),
             download_enabled=download_enabled,
             verbose=False,
         )
     except (OSError, RuntimeError, ValueError) as exc:
-        raise OCRError(f"EasyOCR could not initialize its English model: {exc}") from exc
+        raise OCRError(f"EasyOCR could not initialize its {','.join(languages)} models: {exc}") from exc
 
 
 def extract_ocr_lines(image: Any) -> list[OCRLine]:

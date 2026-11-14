@@ -587,6 +587,44 @@ def run_paddle_ocr(image: Image.Image) -> list[dict[str, Any]]:
     return regions
 
 
+def retain_significant_room_regions(
+    regions: list[dict[str, Any]],
+    native_width: int,
+    native_height: int,
+    *,
+    area_ratio: float = 0.004,
+) -> list[dict[str, Any]]:
+    """Remove tiny room-mask fragments before room counts or 3D display.
+
+    CubiCasa produces semantic contours, not room-instance identities. A
+    noisy contour can therefore look like an additional room. We use a
+    source-relative footprint threshold for room labels only; object symbols
+    such as doors and windows are left untouched.
+    """
+    room_labels = {
+        "kitchen", "living room", "bedroom", "bath", "hallway", "storage",
+        "garage", "other room",
+    }
+    threshold = max(25.0, float(native_width * native_height) * area_ratio)
+    retained: list[dict[str, Any]] = []
+    for region in regions:
+        label = str(region.get("label", "")).casefold()
+        if label not in room_labels:
+            retained.append(region)
+            continue
+        points = region.get("points", [])
+        if len(points) < 3:
+            continue
+        area = abs(sum(
+            float(points[index][0]) * float(points[(index + 1) % len(points)][1])
+            - float(points[(index + 1) % len(points)][0]) * float(points[index][1])
+            for index in range(len(points))
+        )) * 0.5
+        if area >= threshold:
+            retained.append(region)
+    return retained
+
+
 @lru_cache(maxsize=1)
 def _load_paddle_ocr() -> Any:
     try:
@@ -604,8 +642,11 @@ def _load_paddle_ocr() -> Any:
             "STOA_OCR_DOWNLOAD_MODELS=true to allow first-use downloads."
         )
     try:
+        language = os.getenv("STOA_OCR_LANGUAGE", "en").strip().casefold()
+        if language not in {"en", "fi"}:
+            raise VisionInferenceError("STOA_OCR_LANGUAGE must be either en or fi.")
         return PaddleOCR(
-            lang="en",
+            lang=language,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
@@ -614,4 +655,4 @@ def _load_paddle_ocr() -> Any:
             cpu_threads=_environment_int("STOA_OCR_CPU_THREADS", 1, 1, 8),
         )
     except (OSError, RuntimeError, ValueError) as exc:
-        raise VisionInferenceError("PaddleOCR could not initialize its English models.") from exc
+        raise VisionInferenceError("PaddleOCR could not initialize its configured language models.") from exc

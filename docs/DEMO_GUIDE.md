@@ -6,10 +6,16 @@ From `C:\Users\HP\Desktop\JunctionHack`:
 
 ```powershell
 python -m pip install -r requirements.txt
+Set-Location frontend\blue_logic
+npm ci
+npm run build
+Set-Location ..\..
 python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Open `http://127.0.0.1:8000`. The app defaults to the local Esplanades IFC example when available. It also exposes the companion plan as a faithful preview; IFC entity evidence is not projected onto that page.
+Open `http://127.0.0.1:8000`. The app defaults to the local Esplanades IFC example when available. It also exposes the companion plan as a faithful preview; IFC entity evidence is not projected onto that page. In development, run `npm run dev` from `frontend\blue_logic` in a second terminal and open `http://127.0.0.1:5173`.
+
+The BLUELOGIC workbench pages native IFC meshes and lets you select products to inspect their GlobalIds and provenance. IFC answer evidence is highlighted in 3D only when the answer supplies matching entity IDs; it is not drawn onto the companion PDF without a verified model-to-page transform. For an image or PDF, use **Reconstruct plan view** to run the local CubiCasa segmenter. Its polygons are source-linked detections, and the 2.5D extrusion is explicitly illustrative—not a dimensioned or metric building model. `/legacy` keeps the prior STOA UI available.
 
 ## Scenario 1 — BIM entity count
 
@@ -69,6 +75,19 @@ Expected behavior:
 
 Door counts may use named block references or `LWPOLYLINE` records on the explicit `DOOR` layer. Other DXF geometry is not treated as an object count.
 
+## Scenario 4 — Explainable classical-CV geometry
+
+Select a raster floor plan or PDF page and ask:
+
+> Highlight the major wall lines and show their directions.
+
+Expected behavior:
+
+- The router selects the local `classical_cv_analysis` tool when OpenCV and NumPy are available.
+- Adaptive thresholding, morphology, Canny edges, probabilistic Hough lines, and connected components produce source-aligned evidence.
+- The result is explicitly partial geometric analysis. It does not claim that every detected line is a wall and does not convert components into door, room, or fixture counts.
+- The evidence overlays show the detected polylines and component boxes directly on the source page/image.
+
 ## Optional local OCR
 
 Install the OCR extra with `python -m pip install -r requirements-ocr.txt`. To permit EasyOCR to download its English model weights on first use, set `STOA_OCR_DOWNLOAD_MODELS=true` in the backend process before starting the app. Without this opt-in, put `craft_mlt_25k.pth` and `english_g2.pth` in `%USERPROFILE%\.EasyOCR\model` or set `STOA_OCR_MODEL_DIR` to their local directory. The tool registry and document capability cards report OCR unavailable until the engine and weights are ready.
@@ -77,7 +96,7 @@ On a PNG/JPEG, ask:
 
 > Find readable text on this drawing.
 
-For scanned PDFs, select the page in the viewer and ask the same. When native selectable text is absent or not relevant, the app OCRs only the selected page. Click an OCR evidence card to highlight its pixel/PDF-point box. Results are English-only and marked partial because OCR can misread construction lettering. OCR does not supply door/window detections or validated quantity totals.
+For scanned PDFs, select the page in the viewer and ask the same. When native selectable text is absent or not relevant, the app OCRs only the selected page. Click an OCR evidence card to highlight its pixel/PDF-point box. PaddleOCR can be configured with `STOA_OCR_LANGUAGE=fi` for Finnish; EasyOCR supports `STOA_OCR_LANGUAGES=fi,en` when the corresponding local weights are cached or downloads are explicitly enabled. OCR results remain partial because recognition can misread construction lettering, and OCR does not supply door/window detections or validated quantity totals.
 
 ## Optional Gemini semantic review
 
@@ -105,3 +124,22 @@ python scripts\create_splits.py --seed 2026
 ```
 
 Never pass `artifacts/evaluation/gold/*.jsonl` to the server or frontend.
+
+## Recommended judge flow
+
+Use the in-app **VERIFIED STARTERS** after selecting a document. A concise 3-minute flow is:
+
+1. **Accuracy:** open the Esplanades IFC model and run `How many doors are in this model?`. This exercises the deterministic IfcOpenShell count path and returns GlobalIds as evidence.
+2. **Verifiability:** select an evidence result. The 3D viewer isolates the returned IFC products, while the evidence panel shows the source document, entity type, GlobalId, and confidence/validation state.
+3. **Hybrid reconstruction:** select `colorful-34.png` and click **Reconstruct plan view**. The local CubiCasa output becomes an evidence-linked 2.5D scene with detected symbol-to-room relationships; the UI labels its unknown scale and illustrative height instead of presenting guessed metric quantities.
+4. **Document retrieval:** select the PDF schedule and ask for readable text. The answer links to the real page and bounding box, so a judge can verify it directly on the source.
+
+The design is intentionally local-first: IFC, DXF, PDF parsing, geometry, evidence validation, and scene construction run without an LLM. Groq is an optional question router, not the source of numeric answers, keeping inference cost low and making unsupported questions abstain visibly.
+
+For answer-free benchmark execution, use:
+
+```powershell
+python scripts\run_runtime_eval.py --source ifc_bench --limit 20 --output artifacts\evaluation\predictions.jsonl
+```
+
+The runner loads only protected input rows and writes predictions; it never reads the gold answers. Score its output separately with the protocol in [`docs/EVALUATION.md`](./EVALUATION.md).

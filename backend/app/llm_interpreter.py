@@ -103,6 +103,14 @@ def _planning_tool(allowed_tools: list[str]) -> dict[str, Any]:
                         "type": "string",
                         "enum": ["count", "measure", "find_text", "calculate", "describe"],
                     },
+                    "question_type": {
+                        "type": "string",
+                        "enum": ["count", "area", "length", "volume", "text", "other"],
+                    },
+                    "intent": {
+                        "type": "string",
+                        "enum": ["count", "measure", "retrieve", "aggregate", "compare", "summarize", "describe"],
+                    },
                     "entity_concepts": {
                         "type": "array",
                         "items": {"type": "string", "enum": list(ENTITY_TERMS)},
@@ -214,6 +222,11 @@ def interpret_with_provider(
         ):
             raise ValueError("provider selected an unavailable or unregistered tool")
         parsed["original_question"] = question
+        # Older/plainer planners may omit the new metadata. Derive it locally
+        # rather than rejecting an otherwise valid plan.
+        local_spec = interpret_question(question)
+        parsed.setdefault("question_type", local_spec.question_type)
+        parsed.setdefault("intent", local_spec.intent)
         spec = QuestionSpec.model_validate(parsed)
         tool_operations = {
             item.name: set(item.operations)

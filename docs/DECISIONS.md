@@ -1,5 +1,14 @@
 # Architecture decisions
 
+## 2026-11-14 — BLUELOGIC scene API and React/Three.js workbench
+
+- Preserve the existing FastAPI evidence pipeline and STOA UI. Add the BLUELOGIC client as a separate React/TypeScript/Vite application, served from the production build when present; keep the prior interface at `/legacy`.
+- Tessellate native IFC product representations with IfcOpenShell, keep GlobalIds, storey relationships, and source provenance, and page large models so they are not all serialized on initial load. Rebase coordinates for browser rendering; IFC source coordinates remain metres.
+- Raster/PDF reconstruction is an explicit user action using the local CubiCasa segmenter. Mark raster polygons as detected and all display extrusion as illustrative; metric height and floor area remain unknown.
+- Use the model selection endpoint only for evidence GlobalIds returned by local answer tools. Do not claim that IFC geometry is aligned to the companion PDF without a verified transform.
+- Keep provider calls separate and opt-in in the UI: Groq plans tools only, and the configured Gemini adapter is only used when the user explicitly consents to image review. Never send credentials to the browser.
+- Build the frontend with `npm ci`/`npm run build`; run `npm run typecheck` and the Python tests. The dataset, credentials, IFC source, and model weights remain outside the frontend build.
+
 ## 2026-11-13 — Local-first MVP in the existing workspace
 
 - The dataset lives under `junction-dataset-preview/`; application code and generated artifacts live at the project root.

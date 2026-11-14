@@ -489,7 +489,11 @@ function renderAnswer(result) {
   statusText.textContent = result.status;
   status.append(dot, statusText);
   const route = document.createElement("span");
-  route.textContent = result.question_spec?.operation || "analysis";
+  const questionType = result.question_spec?.question_type;
+  const operation = result.question_spec?.operation;
+  route.textContent = questionType
+    ? `${questionType}${operation && operation !== questionType ? ` · ${operation}` : ""}`
+    : operation || "analysis";
   meta.append(status, route);
   const answer = document.createElement("p");
   answer.className = "answer-text";

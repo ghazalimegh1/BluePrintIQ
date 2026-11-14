@@ -1,6 +1,32 @@
-# STOA Junction 2026 — Construction Document Intelligence
+# BLUELOGIC · Junction 2026 Construction Intelligence
 
 Local-first construction-document system prototype. It detects document formats, uses Groq only to plan/select registered tools, and returns source-linked evidence where the selected local pipeline supports it.
+
+## BLUELOGIC spatial workbench
+
+The React/TypeScript interface in `frontend/blue_logic/` adds a source drawing viewer, paged native IFC scene, selectable model elements, source evidence overlays, and a question/trace panel. IFC triangles come from IfcOpenShell and retain their GlobalIds and provenance; large models load in pages. A raster/PDF 2.5D view is an explicit user-triggered CubiCasa inference and is labelled display-only because its scale and extrusion heights are unknown. It is not a metric BIM reconstruction.
+
+From the project root, either use Vite for development and run FastAPI in another terminal:
+
+```powershell
+Set-Location frontend\blue_logic
+npm ci
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. Vite proxies `/api` to the FastAPI server at `http://127.0.0.1:8000`.
+
+For the production-style FastAPI-served UI, build before starting the backend:
+
+```powershell
+Set-Location frontend\blue_logic
+npm ci
+npm run build
+Set-Location ..\..
+python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+```
+
+The previous vanilla STOA interface remains available at `/legacy`. IFC scene endpoints are `GET /api/documents/{id}/scene` (paged) and `POST /api/documents/{id}/scene/elements` (GlobalId geometry).
 
 ## What works today
 
@@ -10,6 +36,7 @@ Local-first construction-document system prototype. It detects document formats,
 - Search selectable PDF text and return exact page spans, PDF-point boxes, and clickable highlights. Optional local vision models process selected raster/PDF pages when their dependencies and weights are installed.
 - Run optional local PaddleOCR or EasyOCR on raster text questions and on the selected PDF page when selectable text is absent. OCR results include source-aligned text boxes; OCR is not used to claim object counts.
 - Route raster questions to Grounding DINO Tiny, SAM 2.1, and CubiCasa5K when their local weights are installed. These models return source-aligned detections/masks; counts remain partial predictions, not verified truth.
+- Route explicit wall-line and classical-CV questions through an optional OpenCV analysis layer using adaptive thresholding, morphology, Canny edges, probabilistic Hough lines, and connected components. Its output is geometric evidence, not semantic object counting.
 - Search native SVG text and locate untransformed text anchors.
 - Query explicitly named DXF door blocks/layers, highlight source geometry, and calculate closed room-outline areas using declared DXF units. Unsupported scope and incomplete outlines are surfaced rather than hidden.
 - Use optional Gemini free-tier semantic review for local Grounding DINO detections after separate per-request consent. Gemini cannot answer questions, count objects, provide measurements, or alter detector boxes.
@@ -67,6 +94,12 @@ Evaluate predictions without connecting the evaluator to the runtime:
 
 ```powershell
 python scripts\evaluate.py --predictions predictions.jsonl --gold artifacts\evaluation\gold\validation_gold.jsonl
+```
+
+To produce predictions from answer-free held-out inputs, use the same runtime path as the API:
+
+```powershell
+python scripts\run_runtime_eval.py --source ifc_bench --limit 20 --output artifacts\evaluation\predictions.jsonl
 ```
 
 See [docs/DATA_AUDIT.md](docs/DATA_AUDIT.md), [docs/DATA_SPLITS.md](docs/DATA_SPLITS.md), and [docs/DEMO_GUIDE.md](docs/DEMO_GUIDE.md) for audited facts and example flows.

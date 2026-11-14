@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -26,16 +27,21 @@ from backend.app.gemini_vision import (
 )
 from backend.app.ocr import OCRLine, OCRUnavailable, paddle_ocr_is_available
 from backend.app.routing import _raster_vision_answer, answer_question
+from backend.app.scene import build_ifc_scene, build_raster_scene
 from backend.app.schemas import (
     AskRequest,
     DocumentRecord,
     EvidenceRef,
     LLMProviderConfig,
     QuestionSpec,
+    SceneResponse,
+    SceneSelectionRequest,
     ToolResult,
 )
 from backend.app.tools import interpret_question
 from backend.app.vision_models import (
+    Detection,
+    ImageTile,
     SourceImage,
     VisionInferenceError,
     _load_paddle_ocr,
@@ -48,6 +54,201 @@ DATA = ROOT / "junction-dataset-preview" / "data"
 
 
 class RealDocumentTests(unittest.TestCase):
+    @unittest.skipUnless(
+        importlib.util.find_spec("ifcopenshell"),
+        "IfcOpenShell is not installed",
+    )
+    def test_ifc_scene_contains_native_global_id_mesh_and_explicit_provenance(self):
+        relative = "data/ifc_models/bsc-esplanades_1807-ep-ar-v18.ifc"
+        path = DATA / "ifc_models" / "bsc-esplanades_1807-ep-ar-v18.ifc"
+        if not path.is_file():
+            self.skipTest("The optional local dataset is not present.")
+        scene = build_ifc_scene(
+            "ifc-scene-test",
+            relative,
+            path,
+            limit=2,
+        )
+
+        self.assertEqual(scene.status, "ready")
+        self.assertEqual(scene.coordinate_system, "ifc_world_m")
+        self.assertEqual(scene.unit, "m")
+        self.assertEqual(len(scene.elements), 2)
+        first = scene.elements[0]
+        self.assertTrue(first.global_id)
+        self.assertEqual(first.id, f"ifc:{first.global_id}")
+        self.assertEqual(first.geometry_kind, "triangle_mesh")
+        self.assertEqual(len(first.vertices) % 3, 0)
+        self.assertEqual(len(first.indices) % 3, 0)
+        self.assertEqual(first.provenance["status"], "explicit")
+        self.assertEqual(first.provenance["source_tool"], "ifcopenshell.geom")
+        self.assertEqual(first.provenance["source_document_id"], "ifc-scene-test")
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("shapely"),
+        "Shapely is not installed",
+    )
+    def test_raster_scene_uses_detected_regions_and_marks_extrusion_illustrative(self):
+        from PIL import Image
+
+        source = SourceImage(
+            image=Image.new("RGB", (100, 100), color="white"),
+            coordinate_system="image_pixels",
+            native_width=100,
+            native_height=100,
+            page_number=1,
+        )
+        regions = [{
+            "label": "wall",
+            "score": 0.91,
+            "bbox": [10, 10, 80, 80],
+            "points": [[10, 10], [80, 10], [80, 80], [10, 80]],
+        }]
+        with patch(
+            "backend.app.vision_models.load_source_image",
+            return_value=source,
+        ), patch(
+            "backend.app.vision_models.segment_floorplan_cubicasa",
+            return_value=regions,
+        ):
+            scene = build_raster_scene(
+                "raster-scene-test",
+                "upload/plan.png",
+                Path("plan.png"),
+                "png",
+            )
+
+        self.assertEqual(scene.status, "partial")
+        self.assertEqual(scene.coordinate_system, "source_pixels_display_only")
+        self.assertEqual(len(scene.elements), 1)
+        wall = scene.elements[0]
+        self.assertEqual(wall.entity_type, "wall")
+        self.assertEqual(wall.provenance["status"], "detected")
+        self.assertEqual(wall.provenance["confidence"], 0.91)
+        self.assertIsNone(wall.properties["height"]["value"])
+        self.assertEqual(wall.properties["display_height"]["status"], "illustrative")
+        self.assertTrue(scene.warnings)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("shapely"),
+        "Shapely is not installed",
+    )
+    def test_raster_scene_links_symbol_to_detected_room_evidence(self):
+        from PIL import Image
+
+        source = SourceImage(
+            image=Image.new("RGB", (200, 120), color="white"),
+            coordinate_system="image_pixels",
+            native_width=200,
+            native_height=120,
+            page_number=1,
+        )
+        regions = [
+            {
+                "label": "bedroom",
+                "score": 0.92,
+                "bbox": [10, 10, 100, 100],
+                "points": [[10, 10], [100, 10], [100, 100], [10, 100]],
+            },
+            {
+                "label": "window",
+                "score": 0.87,
+                "bbox": [40, 40, 60, 60],
+                "points": [[40, 40], [60, 40], [60, 60], [40, 60]],
+            },
+        ]
+        with patch(
+            "backend.app.vision_models.load_source_image",
+            return_value=source,
+        ), patch(
+            "backend.app.vision_models.segment_floorplan_cubicasa",
+            return_value=regions,
+        ):
+            scene = build_raster_scene(
+                "raster-relationship-test",
+                "upload/plan.png",
+                Path("plan.png"),
+                "png",
+            )
+
+        room, window = scene.elements
+        self.assertEqual(room.entity_type, "room")
+        self.assertEqual(window.entity_type, "window")
+        self.assertEqual(window.properties["evidence_id"]["status"], "explicit")
+        self.assertEqual(window.provenance["source_evidence_id"], window.properties["evidence_id"]["value"])
+        self.assertEqual(window.relationships[0].relationship_type, "detected_inside_room")
+        self.assertEqual(window.relationships[0].target_id, room.id)
+        self.assertEqual(window.relationships[0].provenance_status, "detected")
+
+    def test_scene_api_validates_pagination_and_forwards_requested_page(self):
+        document = DocumentRecord(
+            document_id="a" * 24,
+            path="data/model.ifc",
+            source="test",
+            format="ifc",
+            size_bytes=1,
+        )
+        scene = SceneResponse(
+            document_id=document.document_id,
+            source_path=document.path,
+            source_format="ifc",
+            status="ready",
+            coordinate_system="ifc_world_m",
+            unit="m",
+        )
+        with patch(
+            "backend.app.main.ingestion.find_document",
+            return_value=(document, Path("model.ifc")),
+        ), patch("backend.app.main.build_scene", return_value=scene) as build:
+            response = main.document_scene(document.document_id, offset=20, limit=30, page=2)
+
+        self.assertEqual(response, scene)
+        self.assertEqual(build.call_args.kwargs["offset"], 20)
+        self.assertEqual(build.call_args.kwargs["limit"], 30)
+        self.assertEqual(build.call_args.kwargs["page_number"], 2)
+
+        with self.assertRaises(HTTPException) as raised:
+            main.document_scene(document.document_id, offset=-1, limit=30, page=2)
+        self.assertEqual(raised.exception.status_code, 422)
+
+    def test_selected_scene_api_only_accepts_ifc_and_forwards_global_ids(self):
+        document = DocumentRecord(
+            document_id="b" * 24,
+            path="data/model.ifc",
+            source="test",
+            format="ifc",
+            size_bytes=1,
+        )
+        scene = SceneResponse(
+            document_id=document.document_id,
+            source_path=document.path,
+            source_format="ifc",
+            status="ready",
+            coordinate_system="ifc_world_m",
+            unit="m",
+        )
+        selected = SceneSelectionRequest(element_ids=["0ABCDEFGHIJKLMNOPQRSTU"])
+        with patch(
+            "backend.app.main.ingestion.find_document",
+            return_value=(document, Path("model.ifc")),
+        ), patch("backend.app.main.build_scene", return_value=scene) as build:
+            response = main.selected_scene_elements(document.document_id, selected)
+
+        self.assertEqual(response, scene)
+        self.assertEqual(
+            build.call_args.kwargs["selected_ids"],
+            selected.element_ids,
+        )
+
+        image = document.model_copy(update={"format": "png"})
+        with patch(
+            "backend.app.main.ingestion.find_document",
+            return_value=(image, Path("plan.png")),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                main.selected_scene_elements(image.document_id, selected)
+        self.assertEqual(raised.exception.status_code, 415)
+
     def test_paddle_ocr_requires_cached_weights_or_explicit_download_opt_in(self):
         fake_paddleocr = ModuleType("paddleocr")
         fake_paddleocr.PaddleOCR = MagicMock()
@@ -103,6 +304,31 @@ class RealDocumentTests(unittest.TestCase):
                     self.assertEqual(ocr.kwargs["device"], "cpu")
                     self.assertFalse(ocr.kwargs["enable_mkldnn"])
                     self.assertEqual(ocr.kwargs["cpu_threads"], 2)
+        finally:
+            _load_paddle_ocr.cache_clear()
+
+    def test_paddle_ocr_accepts_finnish_language_configuration(self):
+        fake_paddleocr = ModuleType("paddleocr")
+
+        class FakePaddleOCR:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        fake_paddleocr.PaddleOCR = FakePaddleOCR
+        try:
+            with patch.dict(
+                sys.modules, {"paddleocr": fake_paddleocr}
+            ), patch.dict(
+                "os.environ",
+                {"STOA_OCR_LANGUAGE": "fi", "STOA_OCR_DOWNLOAD_MODELS": "true"},
+                clear=False,
+            ), patch(
+                "backend.app.vision_models.paddle_ocr_models_cached",
+                return_value=False,
+            ):
+                _load_paddle_ocr.cache_clear()
+                ocr = _load_paddle_ocr()
+                self.assertEqual(ocr.kwargs["lang"], "fi")
         finally:
             _load_paddle_ocr.cache_clear()
 
@@ -709,6 +935,106 @@ class RealDocumentTests(unittest.TestCase):
         self.assertTrue(any(step.tool_name == "grounding_dino_detection" for step in result.trace))
         detect.assert_called_once()
 
+    def test_window_count_routes_to_cubicasa_and_returns_region_evidence(self):
+        relative = "data/cubicasa5k/colorful-11397.png"
+        path = DATA / "cubicasa5k" / "colorful-11397.png"
+        source = SourceImage(
+            image=__import__("PIL.Image", fromlist=["Image"]).new("RGB", (200, 120)),
+            coordinate_system="image_pixels",
+            native_width=200,
+            native_height=120,
+            page_number=1,
+        )
+        tools = [
+            {
+                "name": "grounding_dino_detection",
+                "input_formats": ["png"],
+                "available": True,
+            },
+            {
+                "name": "cubicasa_floorplan_segmentation",
+                "input_formats": ["png"],
+                "available": True,
+            },
+        ]
+        windows = [
+            {
+                "label": "window",
+                "score": 0.88,
+                "bbox": [10, 10, 30, 20],
+                "points": [[10, 10], [30, 10], [30, 20], [10, 20]],
+            },
+            {
+                "label": "window",
+                "score": 0.79,
+                "bbox": [80, 10, 100, 20],
+                "points": [[80, 10], [100, 10], [100, 20], [80, 20]],
+            },
+            {
+                "label": "door",
+                "score": 0.91,
+                "bbox": [50, 50, 70, 90],
+                "points": [[50, 50], [70, 50], [70, 90], [50, 90]],
+            },
+        ]
+        tile = ImageTile(image=source.image, x=0, y=0, index=0)
+        detector_windows = [
+            Detection("window", 0.84, (10.0, 10.0, 30.0, 20.0), tile, (10.0, 10.0, 30.0, 20.0)),
+            Detection("window", 0.81, (80.0, 10.0, 100.0, 20.0), tile, (80.0, 10.0, 100.0, 20.0)),
+        ]
+        with (
+            patch("backend.app.routing.available_tools", return_value=tools),
+            patch("backend.app.routing.load_source_image", return_value=source),
+            patch("backend.app.routing.segment_floorplan_cubicasa", return_value=windows) as segment,
+            patch("backend.app.routing.detect_objects", return_value=detector_windows) as detect,
+        ):
+            result = answer_question(
+                "raster-window-count-test",
+                relative,
+                path,
+                "png",
+                "How many windows are shown on this floor plan?",
+            )
+
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.value, 2)
+        self.assertEqual(len(result.evidence), 2)
+        self.assertEqual(len(result.overlays), 2)
+        self.assertEqual(result.question_spec.entity_concepts, ["window"])
+        self.assertTrue(any(step.tool_name == "cubicasa_floorplan_segmentation" for step in result.trace))
+        self.assertTrue(any("Cross-check" in warning for warning in result.warnings))
+        detect.assert_called_once()
+
+    def test_room_count_routes_to_cubicasa_room_labels(self):
+        from PIL import Image
+
+        regions = [
+            {"label": "bedroom", "score": 0.95, "bbox": [0, 0, 10, 10], "points": [[0, 0], [10, 0], [10, 10]]},
+            {"label": "kitchen", "score": 0.92, "bbox": [12, 0, 20, 10], "points": [[12, 0], [20, 0], [20, 10]]},
+            {"label": "wall", "score": 0.99, "bbox": [0, 12, 20, 14], "points": [[0, 12], [20, 12], [20, 14]]},
+        ]
+        with patch("backend.app.routing.segment_floorplan_cubicasa", return_value=regions) as segment, patch(
+            "backend.app.routing.load_source_image",
+            return_value=SourceImage(
+                image=Image.new("RGB", (20, 20), "white"),
+                coordinate_system="image_pixels",
+                native_width=20,
+                native_height=20,
+                page_number=1,
+            ),
+        ):
+            result = answer_question(
+                "raster-room-count-test",
+                "data/cubicasa5k/colorful-11397.png",
+                DATA / "cubicasa5k" / "colorful-11397.png",
+                "png",
+                "How many rooms are shown?",
+            )
+        self.assertEqual(result.value, 2)
+        self.assertIn("2 rooms", result.answer)
+        self.assertEqual(len(result.evidence), 2)
+        segment.assert_called_once()
+
     def test_backend_key_alone_never_sends_image_without_ui_provider_selection(self):
         relative = "data/cubicasa5k/colorful-11397.png"
         path = DATA / "cubicasa5k" / "colorful-11397.png"
@@ -856,10 +1182,42 @@ class RealDocumentTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "supported")
         self.assertGreater(result.value, 0)
+
+    @unittest.skipUnless(importlib.util.find_spec("ifcopenshell"), "IfcOpenShell is not installed")
+    def test_unscoped_ifc_count_explains_multi_storey_context(self):
+        relative = "data/ifc_models/bsc-esplanades_1807-ep-ar-v18.ifc"
+        path = DATA / "ifc_models" / "bsc-esplanades_1807-ep-ar-v18.ifc"
+        result = answer_question(
+            "real-ifc-multistorey-test",
+            relative,
+            path,
+            "ifc",
+            "How many doors are in this model?",
+        )
+        self.assertEqual(result.status, "partial")
+        self.assertIn("across 5 storeys", result.answer)
+        self.assertTrue(any("companion drawing may show only one level" in warning for warning in result.warnings))
         self.assertEqual(result.value, len(result.evidence))
         self.assertTrue(all(ref.entity_type == "IfcDoor" for ref in result.evidence))
         self.assertTrue(all(ref.entity_id for ref in result.evidence))
         self.assertEqual(result.evidence[0].coordinate_system, "ifc_model_coordinates")
+
+    @unittest.skipUnless(importlib.util.find_spec("ifcopenshell"), "IfcOpenShell is not installed")
+    def test_ifc_floor_question_counts_building_storeys(self):
+        relative = "data/ifc_models/bsc-esplanades_1807-ep-ar-v18.ifc"
+        path = DATA / "ifc_models" / "bsc-esplanades_1807-ep-ar-v18.ifc"
+        result = answer_question(
+            "real-ifc-storey-test",
+            relative,
+            path,
+            "ifc",
+            "How many floors does this model have?",
+        )
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.value, 5)
+        self.assertIn("5 storey", result.answer)
+        self.assertEqual(result.question_spec.entity_concepts, ["storey"])
+        self.assertTrue(all(ref.entity_type == "IfcBuildingStorey" for ref in result.evidence))
 
     @unittest.skipUnless(importlib.util.find_spec("pymupdf"), "PyMuPDF is not installed")
     def test_pdf_search_returns_real_page_box_and_overlay(self):
@@ -909,6 +1267,30 @@ class RealDocumentTests(unittest.TestCase):
         spec = interpret_question("How many trees are shown?")
         self.assertEqual(spec.operation, "count")
         self.assertEqual(spec.entity_concepts, [])
+
+    def test_question_interpreter_corrects_conservative_entity_typos(self):
+        spec = interpret_question("How many windoms are shown on this floor plan?")
+        self.assertEqual(spec.operation, "count")
+        self.assertEqual(spec.entity_concepts, ["window"])
+        self.assertEqual(spec.corrections, ["windoms → windows"])
+
+    def test_question_interpreter_supports_finnish_floor_and_window_phrasing(self):
+        floors = interpret_question("Kuinka monta kerrosta tässä mallissa on?")
+        windows = interpret_question("Kuinka monta ikkunaa pohjapiirustuksessa on?")
+        self.assertEqual(floors.operation, "count")
+        self.assertEqual(floors.entity_concepts, ["storey"])
+        self.assertEqual(windows.operation, "count")
+        self.assertEqual(windows.entity_concepts, ["window"])
+
+    def test_question_interpreter_supports_accented_finnish_count_and_correction(self):
+        count_spec = interpret_question("Mikä on ovien lukumäärä?")
+        self.assertEqual(count_spec.operation, "count")
+        self.assertEqual(count_spec.entity_concepts, ["door"])
+
+        typo_spec = interpret_question("How many windoms are there?")
+        self.assertEqual(typo_spec.operation, "count")
+        self.assertEqual(typo_spec.entity_concepts, ["window"])
+        self.assertTrue(typo_spec.corrections)
 
 
 if __name__ == "__main__":
