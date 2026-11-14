@@ -12,7 +12,7 @@ import {
   Crosshair,
   FileImage,
   FileText,
-  Layers3,
+  DraftingCompass,
   LoaderCircle,
   Maximize2,
   Menu,
@@ -522,19 +522,16 @@ function App() {
           <Menu size={17} />
         </button>
         <a className="brand" href="/" aria-label="BluePrintIQ home">
-          <span className="brand-mark"><Layers3 size={17} strokeWidth={2.2} /></span>
+          <span className="brand-mark"><DraftingCompass size={17} strokeWidth={2.2} /></span>
           <span className="brand-copy">
             <strong>BluePrintIQ</strong>
-            <small>SPATIAL INTELLIGENCE</small>
+            <small>CONSTRUCTION INTELLIGENCE</small>
           </span>
         </a>
-        <div className="workspace-label">
-          <span className="live-dot" /> LOCAL WORKSPACE <span className="slash">/</span> JUNCTION 2026
-        </div>
         <div className="topbar-right">
-          <span className="privacy-chip"><ShieldCheck size={13} /> Source-linked workspace</span>
+          <span className="privacy-chip"><ShieldCheck size={13} /> Source-linked evidence</span>
           <button className="icon-link panel-toggle" onClick={() => setAssistantOpen((open) => !open)} title="Toggle question panel">
-            <MessageSquareText size={15} /><span>{assistantOpen ? "Hide query" : "Ask"}</span>
+            <MessageSquareText size={15} /><span>{assistantOpen ? "Close panel" : "Ask"}</span>
           </button>
           <a className="icon-link" href="/api/health" target="_blank" rel="noreferrer" title="Backend health">
             <Activity size={16} /><span>System</span>
@@ -643,7 +640,7 @@ function App() {
 
           <div className="review-strip" aria-label="Review controls">
             <div className="layer-switch" role="group" aria-label="Evidence layers">
-              <span className="layer-switch-label"><Layers3 size={13} /> REVIEW LAYERS</span>
+              <span className="layer-switch-label"><DraftingCompass size={13} /> REVIEW LAYERS</span>
               <button className={`layer-chip ${viewMode !== "model" ? "active" : ""}`} type="button" onClick={() => setViewMode("drawing")}><span className="layer-dot overview" />Detected overview</button>
               <button className={`layer-chip ${viewMode !== "model" ? "active" : ""}`} type="button" onClick={() => setViewMode("drawing")}><span className="layer-dot evidence" />Answer evidence</button>
               <button className={`layer-chip ${viewMode === "model" ? "active" : ""}`} type="button" onClick={() => setViewMode("model")}><span className="layer-dot model" />Spatial model</button>

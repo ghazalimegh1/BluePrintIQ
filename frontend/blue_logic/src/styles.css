@@ -961,7 +961,7 @@ body {
 .viewport-panel:hover::after { border-color: #71c6c438; }
 .viewport-heading > div span { font-weight: 700; }
 .drawing-stage::before, .model-stage::before { content: "REVIEW CANVAS"; position: absolute; top: 10px; left: 12px; z-index: 1; color: #77959b80; font: 700 8px var(--mono); letter-spacing: .12em; pointer-events: none; }
-.model-stage::before { content: "SPATIAL PREVIEW"; }
+.model-stage::before { content: "MODEL PREVIEW"; }
 .drawing-controls, .drawing-legend { backdrop-filter: blur(10px); box-shadow: 0 8px 22px #0005; }
 .drawing-controls .icon-button:hover { background: #234348; }
 .load-more { backdrop-filter: blur(8px); transition: .15s ease; }

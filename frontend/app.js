@@ -772,7 +772,7 @@ async function uploadFile(file) {
     populateSources();
     renderDocumentList();
     await selectDocument(uploaded.document_id);
-    showToast("Document added to the local workspace.");
+    showToast("Document added to the source library.");
   } catch (error) {
     showToast(`Upload failed: ${error.message}`);
   } finally {
