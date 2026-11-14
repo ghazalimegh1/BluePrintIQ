@@ -1,6 +1,92 @@
-# BLUELOGIC · Junction 2026 Construction Intelligence
+# BluePrintIQ · Construction Intelligence
 
 Local-first construction-document system prototype. It detects document formats, uses Groq only to plan/select registered tools, and returns source-linked evidence where the selected local pipeline supports it.
+
+## Challenge context
+
+BluePrintIQ is a local-first construction-document intelligence system created for the Junction 2026 Helsinki hackathon. It turns architectural drawings, PDFs, CAD files, and IFC/BIM models into searchable, inspectable, evidence-linked answers.
+
+The challenge dataset contains approximately 7,990 annotated construction questions: 6,076 count questions, 1,599 area questions, 265 text/property questions, 34 volume questions, and 16 length questions. The benchmark is focused on reliable quantity takeoff and document understanding: counting architectural elements and fixtures, measuring areas/lengths/volumes, extracting BIM properties, and returning evidence that a person can verify.
+
+The project challenge is not simply to build a chatbot. It is to connect natural-language questions to the right construction specialist, calculate or retrieve the answer from the source document, preserve provenance, and abstain when the available evidence is insufficient.
+
+## What BluePrintIQ does
+
+BluePrintIQ accepts PDF, PNG/JPEG, SVG, DXF, IFC, and recognized DWG inputs. It identifies the source format, inspects capabilities, interprets the question, selects a compatible specialist tool, and returns an answer with evidence and limitations.
+
+The system combines deterministic IFC entity queries, DXF geometry, PDF text retrieval, optional OCR, learned raster vision, classical computer vision, a native IFC scene viewer, and a React/Three.js workbench. The core principle is evidence before answers: LLMs may interpret and route a question, but local specialist tools produce the measurements, counts, geometry, and evidence.
+
+## Architecture overview
+
+```text
+User upload + question
+          │
+          ▼
+Document ingestion and capability detection
+          │
+          ▼
+Question interpreter
+  deterministic parser or optional Groq planner
+          │
+          ▼
+Format-aware capability router
+    ┌─────┼──────────┬───────────┬─────────────┐
+    ▼     ▼          ▼           ▼             ▼
+   IFC   DXF        PDF       Raster       Classical CV
+  BIM   CAD       text/OCR   vision        geometry
+    └─────┴──────────┴───────────┴─────────────┘
+          │
+          ▼
+Evidence and validation layer
+          │
+          ▼
+FastAPI API + BluePrintIQ React/Three.js workbench
+```
+
+### Backend flow
+
+1. `backend/app/ingestion.py` identifies formats, catalogs documents, renders pages, and reports capabilities.
+2. `backend/app/tools.py` contains deterministic parsers and evidence-producing specialist tools.
+3. `backend/app/vision_models.py` contains optional learned vision and segmentation adapters.
+4. `backend/app/classical_cv.py` contains explainable OpenCV line and connected-component analysis.
+5. `backend/app/llm_interpreter.py` validates optional Groq plans without allowing generated answers.
+6. `backend/app/routing.py` selects tools using the question, document format, capabilities, and consent state.
+7. `backend/app/main.py` exposes the FastAPI endpoints used by the frontend.
+
+### Evidence model
+
+Every specialist returns structured evidence containing the document path, page or IFC entity, coordinate system, extracted content, geometry, extraction method, and validation status. The frontend uses this data to highlight source regions or isolate IFC model elements.
+
+The system distinguishes native, measured, detected, inferred, illustrative, partial, and unsupported results. It does not present a model prediction as verified truth.
+
+## Technologies used
+
+| Layer | Technologies |
+|---|---|
+| API | Python 3.13, FastAPI, Uvicorn, Pydantic |
+| IFC/BIM | IfcOpenShell, IFC relationships, GlobalIds, native tessellation |
+| CAD | ezdxf, DXF layers/blocks/polylines, unit-aware geometry |
+| PDF | PyMuPDF rendering and selectable-text coordinates |
+| Raster | Pillow, OpenCV, NumPy |
+| Classical CV | Adaptive thresholding, morphology, Canny, HoughLinesP, contours, connected components |
+| Learned vision | Grounding DINO Tiny, SAM 2.1 Hiera Small, CubiCasa5K |
+| OCR | EasyOCR and optional PaddleOCR |
+| Frontend | React 19, TypeScript, Vite, Three.js, React Three Fiber, Drei, Lucide |
+| Optional planning | Official Groq Python SDK with planner-only structured tool selection |
+| Optional review | Google GenAI Gemini semantic review with explicit consent |
+| Evaluation | Group-aware splitting, protected gold files, count and measurement scoring |
+
+## Demonstrated workflows
+
+- IFC: count doors in a model or storey and return matching GlobalIds.
+- PDF: find schedule text and highlight the exact page region.
+- DXF: calculate total room area from valid closed room outlines.
+- Raster: detect or segment plan elements with source-aligned evidence when local weights are installed.
+- Classical CV: highlight major line candidates and report their directions without claiming every line is a wall.
+
+## Honest limitations
+
+This is a research/demo prototype rather than a certified quantity-surveying or BIM-authoring system. Raster counts are model predictions and require calibrated annotations for benchmark accuracy. General PDF table extraction, broad IFC property aggregation, IFC-to-2D projection, DWG conversion, and complete MEP/structural reasoning are not yet implemented. Native IFC geometry is shown in model coordinates and is not automatically projected onto a companion PDF.
 
 ## BLUELOGIC spatial workbench
 
@@ -26,7 +112,7 @@ Set-Location ..\..
 python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
 
-The previous vanilla STOA interface remains available at `/legacy`. IFC scene endpoints are `GET /api/documents/{id}/scene` (paged) and `POST /api/documents/{id}/scene/elements` (GlobalId geometry).
+The previous vanilla interface remains available at `/legacy`. IFC scene endpoints are `GET /api/documents/{id}/scene` (paged) and `POST /api/documents/{id}/scene/elements` (GlobalId geometry).
 
 ## What works today
 
@@ -45,7 +131,7 @@ The previous vanilla STOA interface remains available at `/legacy`. IFC scene en
 - Generate group-aware train/validation/test data splits. Runtime endpoints never load `questions.jsonl` or the evaluator-only gold directory.
 - Evaluate prediction JSONL separately with exact-count, 2%-measurement, normalized-text, evidence-coverage, and group/source/type metrics.
 
-This remains a prototype, not a fully validated production system. Local Grounding DINO/SAM/CubiCasa and PaddleOCR inference have been smoke-tested in this workspace, but a manually annotated evaluation set and calibrated accuracy metrics are still missing. General PDF schedule/table extraction, DWG conversion, broad DXF reconstruction, IFC geometry projection, and trained STOA models remain unavailable. Groq planner and Gemini review were smoke-tested; Gemini is optional and consent-gated.
+This remains a prototype, not a fully validated production system. Local Grounding DINO/SAM/CubiCasa and PaddleOCR inference have been smoke-tested in this workspace, but a manually annotated evaluation set and calibrated accuracy metrics are still missing. General PDF schedule/table extraction, DWG conversion, broad DXF reconstruction, and IFC geometry projection remain unavailable. Groq planner and Gemini review were smoke-tested; Gemini is optional and consent-gated.
 
 ## Requirements and run
 
