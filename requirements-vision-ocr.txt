@@ -1,0 +1,4 @@
+-r requirements.txt
+-r requirements-vision.txt
+paddlepaddle>=3.3,<4
+paddleocr>=3.0,<4

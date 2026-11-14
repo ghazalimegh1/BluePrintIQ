@@ -1,0 +1,1 @@
+"""STOA document intelligence application."""
