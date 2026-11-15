@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: >-
-      python -m pip install -r requirements.txt &&
+      python -m pip install -r requirements-vision.txt &&
       npm --prefix frontend/blue_logic ci &&
       npm --prefix frontend/blue_logic run build
     startCommand: python -m uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
@@ -13,6 +13,6 @@ services:
       - key: STOA_VISION_DEVICE
         value: cpu
       - key: STOA_VISION_DOWNLOAD_MODELS
-        value: "false"
+        value: "true"
       - key: STOA_OCR_DOWNLOAD_MODELS
         value: "false"
