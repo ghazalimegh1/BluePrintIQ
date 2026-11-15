@@ -14,7 +14,7 @@ MODELS = {
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Cache the public specialist vision checkpoints used by STOA."
+        description="Cache the public specialist vision checkpoints used by BluePrintIQ."
     )
     parser.add_argument(
         "--models",

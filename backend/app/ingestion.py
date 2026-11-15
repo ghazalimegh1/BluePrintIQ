@@ -267,7 +267,7 @@ def _capabilities(path: Path) -> tuple[list[Capability], int | None, str]:
                 ),
                 Capability(
                     capability_type="ifc_geometry", available=False,
-                    limitations=["3D geometry extraction and drawing projection are not enabled in this demo"],
+                    limitations=["3D geometry extraction and drawing projection are not enabled in the current implementation"],
                 ),
             ])
             status = "limited"

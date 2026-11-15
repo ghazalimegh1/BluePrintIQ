@@ -20,8 +20,7 @@ from .schemas import AskRequest, SceneResponse, SceneSelectionRequest
 ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_ROOT = ROOT / "frontend"
 BLUELOGIC_DIST = FRONTEND_ROOT / "dist"
-app = FastAPI(title="STOA Construction Document Intelligence", version="0.1.0")
-app.mount("/static", StaticFiles(directory=FRONTEND_ROOT), name="static")
+app = FastAPI(title="BluePrintIQ Construction Intelligence", version="0.1.0")
 if (BLUELOGIC_DIST / "assets").is_dir():
     app.mount(
         "/assets",
@@ -33,17 +32,17 @@ if (BLUELOGIC_DIST / "assets").is_dir():
 @app.get("/")
 def home() -> FileResponse:
     index = BLUELOGIC_DIST / "index.html"
-    return FileResponse(index if index.is_file() else FRONTEND_ROOT / "index.html")
-
-
-@app.get("/legacy")
-def legacy_home() -> FileResponse:
-    return FileResponse(FRONTEND_ROOT / "index.html")
+    if not index.is_file():
+        raise HTTPException(
+            status_code=503,
+            detail="The frontend build is missing. Run npm --prefix frontend/blue_logic run build.",
+        )
+    return FileResponse(index)
 
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "stoa-local"}
+    return {"status": "ok", "service": "blueprintiq"}
 
 
 @app.get("/api/tools")

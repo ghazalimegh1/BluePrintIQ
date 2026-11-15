@@ -76,7 +76,7 @@ The system distinguishes native, measured, detected, inferred, illustrative, par
 | Optional review | Google GenAI Gemini semantic review with explicit consent |
 | Evaluation | Group-aware splitting, protected gold files, count and measurement scoring |
 
-## Demonstrated workflows
+## Supported workflows
 
 - IFC: count doors in a model or storey and return matching GlobalIds.
 - PDF: find schedule text and highlight the exact page region.
@@ -86,9 +86,9 @@ The system distinguishes native, measured, detected, inferred, illustrative, par
 
 ## Honest limitations
 
-This is a research/demo prototype rather than a certified quantity-surveying or BIM-authoring system. Raster counts are model predictions and require calibrated annotations for benchmark accuracy. General PDF table extraction, broad IFC property aggregation, IFC-to-2D projection, DWG conversion, and complete MEP/structural reasoning are not yet implemented. Native IFC geometry is shown in model coordinates and is not automatically projected onto a companion PDF.
+This is a source-linked prototype rather than a certified quantity-surveying or BIM-authoring system. Raster counts are model predictions and require calibrated annotations for benchmark accuracy. General PDF table extraction, broad IFC property aggregation, IFC-to-2D projection, DWG conversion, and complete MEP/structural reasoning are not yet implemented. Native IFC geometry is shown in model coordinates and is not automatically projected onto a companion PDF.
 
-## BLUELOGIC spatial workbench
+## BluePrintIQ workbench
 
 The React/TypeScript interface in `frontend/blue_logic/` adds a source drawing viewer, paged native IFC scene, selectable model elements, source evidence overlays, and a question/trace panel. IFC triangles come from IfcOpenShell and retain their GlobalIds and provenance; large models load in pages. A raster/PDF 2.5D view is an explicit user-triggered CubiCasa inference and is labelled display-only because its scale and extrusion heights are unknown. It is not a metric BIM reconstruction.
 
@@ -112,7 +112,7 @@ Set-Location ..\..
 python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
 
-The previous vanilla interface remains available at `/legacy`. IFC scene endpoints are `GET /api/documents/{id}/scene` (paged) and `POST /api/documents/{id}/scene/elements` (GlobalId geometry).
+IFC scene endpoints are `GET /api/documents/{id}/scene` (paged) and `POST /api/documents/{id}/scene/elements` (GlobalId geometry).
 
 ## What works today
 
@@ -188,7 +188,7 @@ To produce predictions from answer-free held-out inputs, use the same runtime pa
 python scripts\run_runtime_eval.py --source ifc_bench --limit 20 --output artifacts\evaluation\predictions.jsonl
 ```
 
-See [docs/DATA_AUDIT.md](docs/DATA_AUDIT.md), [docs/DATA_SPLITS.md](docs/DATA_SPLITS.md), and [docs/DEMO_GUIDE.md](docs/DEMO_GUIDE.md) for audited facts and example flows.
+The repository contains the application source, tests, and model setup utilities; licensed benchmark data is intentionally kept outside version control.
 
 ## Groq planner and Gemini vision review
 

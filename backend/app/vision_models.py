@@ -448,7 +448,7 @@ def _load_cubicasa() -> tuple[Any, Any, Any]:
     checkpoint_path = os.getenv("STOA_CUBICASA_CHECKPOINT", "").strip()
     if not cubicasa_configured():
         raise VisionInferenceError(
-            "CubiCasa requires the official source checkout and checkpoint; see docs/ARCHITECTURE.md."
+            "CubiCasa requires its official source checkout and checkpoint to be configured."
         )
     source_path = str(Path(source_dir).resolve())
     if source_path not in sys.path:

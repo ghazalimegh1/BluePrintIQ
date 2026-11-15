@@ -1,1 +1,1 @@
-"""STOA document intelligence application."""
+"""BluePrintIQ construction-document intelligence application."""
