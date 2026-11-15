@@ -6,7 +6,8 @@ services:
     buildCommand: >-
       python -m pip install -r requirements-vision.txt &&
       npm --prefix frontend/blue_logic ci &&
-      npm --prefix frontend/blue_logic run build
+      npm --prefix frontend/blue_logic run build &&
+      python scripts/download_vision_models.py --models grounding-dino-tiny
     startCommand: python -m uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
     envVars:
